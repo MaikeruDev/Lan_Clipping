@@ -5,43 +5,46 @@ import time
 import tkinter as tk
 from threading import Timer
 import ctypes
-import glob
 
 FPS = 30  # Frames per second
-SEGMENT_DURATION = 8  # Duration of each segment in seconds
-TOTAL_DURATION = 20  # Duration to save when F9 is pressed
+DURATION = 20  # Duration in seconds for the last portion to save
 OUTPUT_DIR = "C:\\LANClips\\OneDrive\\LAN\\"
-SEGMENTS_DIR = "temp_segments"
+BUFFER_FILE = "temp_buffer.mp4"
+
+recording_process = None
 
 user32 = ctypes.windll.user32
 screensize = user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
 
 def start_ffmpeg_recording():
-    """Starts an FFmpeg process to record continuously in short segments."""
-    if not os.path.exists(SEGMENTS_DIR):
-        os.makedirs(SEGMENTS_DIR)
-
+    """Starts an FFmpeg process to record only the primary screen and save it in segments."""
+    global recording_process
     command = [
         'ffmpeg',
         '-y',  # Overwrite output files without asking
         '-f', 'gdigrab',  # Capture desktop for Windows
-        '-framerate', str(FPS),
+        '-framerate', str(FPS),  # Framerate of the screen capture
         '-offset_x', '0',  # Start at the top-left corner (0,0)
         '-offset_y', '0',
-        '-video_size', f'{screensize[0]}x{screensize[1]}',  # Adjust to your main screen resolution
+        '-video_size', f'{user32.GetSystemMetrics(0)}x{user32.GetSystemMetrics(1)}',  # Screen resolution
         '-i', 'desktop',  # Capture desktop
-        '-c:v', 'libx264',
-        '-preset', 'ultrafast',  # Use ultrafast preset to reduce CPU usage
+        '-c:v', 'libx264', #libx264
+        '-preset', 'ultrafast',  # Reduce CPU usage
         '-pix_fmt', 'yuv420p',
-        '-f', 'segment',  # Use segment format to create multiple small files
-        '-segment_time', str(SEGMENT_DURATION),  # Duration of each segment
+        '-f', 'segment',  # Output segmented files
+        '-segment_time', '1',  # Create 1-second segments
+        '-force_key_frames', 'expr:gte(t,n_forced*1)',  # Force keyframes every 1 second
         '-reset_timestamps', '1',  # Reset timestamps for each segment
-        '-strftime', '1',  # Use timestamps in segment filenames
-        os.path.join(SEGMENTS_DIR, 'segment_%Y%m%d%H%M%S.mp4')  # Segment file pattern
+        '-segment_wrap', '40',  # Keep only the last 20 segments
+        os.path.join(OUTPUT_DIR, 'temp_buffer_%03d.mp4')  # Output file naming pattern
     ]
 
     # Start the FFmpeg process in a subprocess
-    return subprocess.Popen(command)
+    recording_process = subprocess.Popen(command)
+
+
+import tkinter as tk
+from threading import Timer
 
 def show_notification(message, duration=2):
     """Display a sleek temporary overlay with a message."""
@@ -78,55 +81,60 @@ def show_notification(message, duration=2):
     root.mainloop()
 
 def save_clip():
+    global recording_process
     uname = os.getlogin()
     timestr = time.strftime("%Y%m%d-%H%M%S")
     output_filename = os.path.join(OUTPUT_DIR, f"{uname}_{timestr}_clip.mp4")
 
-    # Get the list of segment files sorted by modification time
-    segment_files = sorted(glob.glob(os.path.join(SEGMENTS_DIR, 'segment_*.mp4')), key=os.path.getmtime)
+    # Stop the current recording to ensure the segments are up to date
+    recording_process.terminate()
+    recording_process.wait()
 
-    # Calculate the number of segments needed to cover at least 20 seconds
-    num_segments_to_keep = (TOTAL_DURATION // SEGMENT_DURATION) + (1 if TOTAL_DURATION % SEGMENT_DURATION != 0 else 0)
-    
-    # Get the latest segments from the end of the list
-    segment_files_to_keep = segment_files[-num_segments_to_keep:]
+    # Create a text file listing all the segments (since there are 40 segments)
+    segment_list = os.path.join(OUTPUT_DIR, 'segment_list.txt')
+    with open(segment_list, 'w') as f:
+        for i in range(40):  # Concatenate all 40 segments
+            f.write(f"file 'temp_buffer_{i:03d}.mp4'\n")
 
-    # Ensure that only the segments that cover the last 20 seconds are used
-    with open("segments_list.txt", "w") as f:
-        for segment in segment_files_to_keep:
-            f.write(f"file '{segment}'\n")
+    # Temporary file to hold the full concatenated result before trimming
+    full_temp_file = os.path.join(OUTPUT_DIR, "full_temp_buffer.mp4")
 
-    # Use FFmpeg to concatenate the selected segments and save to output file
-    command = [
+    # Concatenate all segments into a single temporary file
+    concat_command = [
         'ffmpeg',
         '-y',  # Overwrite output files without asking
-        '-f', 'concat',
-        '-safe', '0',
-        '-i', 'segments_list.txt',
-        '-c', 'copy',  # Copy without re-encoding to make it fast
-        output_filename
+        '-f', 'concat',  # Concatenate mode
+        '-safe', '0',  # Allow unsafe file paths
+        '-i', segment_list,  # Input segment list
+        '-c', 'copy',  # Copy without re-encoding
+        full_temp_file  # Temporary output
     ]
 
-    subprocess.call(command)
+    subprocess.call(concat_command)
+
+    # Now trim the concatenated file to only keep the last 20 seconds
+    trim_command = [
+        'ffmpeg',
+        '-y',  # Overwrite output files without asking
+        '-sseof', '-20',  # Start 20 seconds from the end
+        '-i', full_temp_file,  # Input the concatenated file
+        '-c', 'copy',  # Copy without re-encoding
+        output_filename  # Final output file
+    ]
+
+    subprocess.call(trim_command)
     print(f"Recording saved as {output_filename}")
     show_notification("Clip saved!", duration=2)
 
-    time.sleep(2)
-
-    # Delete old segments that are no longer needed
-    segments_to_delete = segment_files[:-num_segments_to_keep]
-    for segment in segments_to_delete:
-        try:
-            os.remove(segment)
-            print(f"Deleted: {segment}")
-        except Exception as e:
-            print(f"Error deleting {segment}: {e}")
+    # Restart the recording process after saving the clip
+    start_ffmpeg_recording()
 
 def main():
+    """Main function to start screen capture and handle keypress events."""
     print("Press F9 to save the last 20 seconds of video...")
 
-    # Start FFmpeg in a continuous segment recording mode
-    recording_process = start_ffmpeg_recording()
+    # Start FFmpeg in a circular buffer mode
+    start_ffmpeg_recording()
 
     try:
         # Main loop to detect key press using the keyboard library
