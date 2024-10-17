@@ -6,7 +6,7 @@ import tkinter as tk
 from threading import Timer
 import ctypes
 
-FPS = 30  # Frames per second
+FPS = 20  # Frames per second
 DURATION = 20  # Duration in seconds for the last portion to save
 OUTPUT_DIR = "C:\\LANClips\\OneDrive\\LAN\\"
 BUFFER_FILE = "temp_buffer.mp4"
@@ -22,26 +22,34 @@ def start_ffmpeg_recording():
     command = [
         'ffmpeg',
         '-y',  # Overwrite output files without asking
-        '-f', 'gdigrab',  # Capture desktop for Windows
+        '-f', 'gdigrab',  # Capture desktop for Windows 
         '-framerate', str(FPS),  # Framerate of the screen capture
         '-offset_x', '0',  # Start at the top-left corner (0,0)
         '-offset_y', '0',
         '-video_size', f'{user32.GetSystemMetrics(0)}x{user32.GetSystemMetrics(1)}',  # Screen resolution
         '-i', 'desktop',  # Capture desktop
-        '-c:v', 'libx264', #libx264
-        '-preset', 'ultrafast',  # Reduce CPU usage
+        '-vf', 'scale=1920:1080',  # Downscale to 1920x1080
+        # Use hardware-accelerated encoder
+        '-c:v', 'h264_nvenc',  # Use NVIDIA GPU acceleration
+        '-preset', 'fast',  # Low-latency high performance preset for nvenc
+        
+        # Set the bitrate to improve quality (4M = 4000k bitrate)
+        '-b:v', '1.5M',  # Set video bitrate to 4 Mbps for better quality
+        
+        # Optionally, use constant quality mode to control quality instead of bitrate
+        '-cq', '30',  # Lower CQ values mean better quality, 23 is a good starting point
+        
         '-pix_fmt', 'yuv420p',
         '-f', 'segment',  # Output segmented files
         '-segment_time', '1',  # Create 1-second segments
         '-force_key_frames', 'expr:gte(t,n_forced*1)',  # Force keyframes every 1 second
         '-reset_timestamps', '1',  # Reset timestamps for each segment
-        '-segment_wrap', '40',  # Keep only the last 20 segments
+        '-segment_wrap', '40',  # Keep only the last 40 segments
         os.path.join(OUTPUT_DIR, 'temp_buffer_%03d.mp4')  # Output file naming pattern
     ]
 
     # Start the FFmpeg process in a subprocess
     recording_process = subprocess.Popen(command)
-
 
 import tkinter as tk
 from threading import Timer
